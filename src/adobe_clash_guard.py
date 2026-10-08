@@ -14,7 +14,7 @@ import uuid
 
 import pylnk3
 
-VERSION = "2.2.0"
+VERSION = "2.2.1"
 # Built-in blocker process names. More can be appended without repackaging through
 # the plain-text "blockers.txt" kept in the fixed install directory; see load_blockers().
 # The alpha core (verge-mihomo-alpha.exe) is listed here because a user can switch
@@ -378,7 +378,12 @@ def serialized_launch(app, files):
 
 
 def install_batch(items, executable, root):
-    """Only called after explicit UI approval for at most ten exact paths."""
+    """Only called for at most ten paths taken from a fresh scan.
+
+    Interactive runs arrive here after the 是/否 dialog. ``--install --yes`` runs
+    arrive directly: the user already approved by launching that entry as
+    administrator, and a second dialog is the step people most often mis-click.
+    """
     if not 0 < len(items) <= 10:
         raise ValueError("每批仅允许 1 到 10 个快捷方式")
     root = Path(root)
@@ -533,6 +538,43 @@ def write_scan_report(report, destination):
     save(destination, report)
 
 
+INSTALL_LOG = "install-log.txt"
+
+
+def write_log(root, lines):
+    """Append one timestamped block to the run log in the fixed install directory.
+
+    A quiet run leaves no dialog to look at afterwards, so every run records what
+    it actually did next to state.json. Opening that file is the fastest way to
+    tell "it really ran" from "the window was dismissed".
+    """
+    path = Path(root) / INSTALL_LOG
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write("\n===== " + stamp + " =====" + "\n")
+        for line in lines:
+            handle.write(str(line).rstrip() + "\n")
+    return path
+
+
+def parse_args(args):
+    """Return ``(action, silent)``, or ``(None, None)`` for a non-install mode.
+
+    ``--yes`` makes the run quiet: the per-batch 是/否 dialog is skipped. That is
+    the entry the shipped shortcut uses, because an extra dialog nobody expects is
+    the single most common way this tool silently does nothing.
+    """
+    if not args:
+        return "--install", False
+    if args[0] not in ("--install", "--restore"):
+        return None, None
+    rest = args[1:]
+    unknown = [item for item in rest if item != "--yes"]
+    if unknown:
+        raise RuntimeError("未知参数：" + " ".join(unknown))
+    return args[0], "--yes" in rest
+
+
 def bundle_root():
     """Folder-build root of the running program, or None for a single-file build.
 
@@ -585,15 +627,77 @@ def install_program(root):
     return target
 
 
+def mark_run_as_admin(path):
+    """Set the RunAsUser bit in the .lnk header so a plain double-click raises UAC.
+
+    MS-SHLLINK puts LinkFlags at offset 20; bit 13 (the 0x20 bit of the second
+    byte) is RunAsUser. Public Start Menu entries can only be rewritten elevated,
+    and without this flag the user has to hunt for "run as administrator" in the
+    context menu -- which is where this tool gets abandoned in practice.
+    """
+    data = bytearray(Path(path).read_bytes())
+    if len(data) >= 24 and int.from_bytes(data[0:4], "little") == 76:
+        data[21] |= 0x20
+        Path(path).write_bytes(bytes(data))
+    return Path(path)
+
+
+def is_elevated():
+    """True when this process already has administrator rights."""
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def is_admin_scope(path):
+    """True for shortcuts living where only administrators may rewrite them."""
+    text = str(path).lower().replace("/", "\\")
+    programdata = os.environ.get("ProgramData", r"C:\ProgramData").lower().rstrip("\\")
+    return text.startswith(programdata + "\\")
+
+
+def relaunch_elevated(silent):
+    """Restart this program through UAC. Returns True once the elevated copy is up.
+
+    Right-clicking and hunting for "run as administrator" is the step users skip,
+    so the program asks for elevation itself when a batch needs it. Windows shows
+    its own prompt; declining returns a small error code and we stop cleanly.
+    """
+    arguments = "--install --yes" if silent else "--install"
+    result = ctypes.windll.shell32.ShellExecuteW(None, "runas", str(SELF), arguments, str(SELF.parent), 1)
+    return result > 32
+
+
+def ensure_elevated_for(items, silent, root):
+    """Hand off to an elevated copy when the batch touches an administrator-only path.
+
+    Returns True when this process should stop now: either the elevated copy is
+    running, or the run is already elevated and can continue on its own.
+    """
+    if not any(is_admin_scope(item["source"]) for item in items):
+        return False
+    if is_elevated():
+        return False
+    if relaunch_elevated(silent):
+        write_log(root, ["本批包含公共开始菜单/公共桌面入口，已请求管理员权限，交由提权后的副本继续。"])
+        return True
+    raise RuntimeError("改写公共开始菜单或公共桌面上的入口需要管理员权限，但提权被取消或拒绝。\n请右键该入口选择「以管理员身份运行」，或先运行「恢复 Adobe 与 Clash 原图标」把公共入口还原。\n本次未修改任何图标。")
+
+
 def helper_links(root, target):
-    for flag, name in [("--install", "补充接入 Adobe 与 Clash 图标"), ("--restore", "恢复 Adobe 与 Clash 原图标")]:
-        pylnk3.for_file(str(target), str(Path(root) / (name + ".lnk")), arguments=flag, work_dir=str(root))
+    # The install entry is quiet (``--yes``): it is launched by right-clicking and
+    # choosing "run as administrator", which is already an explicit act of consent.
+    for flag, name in [("--install --yes", "补充接入 Adobe 与 Clash 图标"), ("--restore", "恢复 Adobe 与 Clash 原图标")]:
+        path = Path(root) / (name + ".lnk")
+        pylnk3.for_file(str(target), str(path), arguments=flag, work_dir=str(root))
+        mark_run_as_admin(path)
 
 
 SCOPE_NOTE = "扫描范围：当前用户桌面、公共桌面，以及用户级与公共开始菜单（递归，不含「启动」文件夹）。"
 
 
-def install_ui():
+def install_ui(silent=False):
     root = state_root()
     # Program first: an updated build replaces the same fixed path, so already-guarded
     # shortcuts pick it up without being touched again.
@@ -602,27 +706,36 @@ def install_ui():
     tidy = prune_state(root)
     report = scan()  # Read-only scan of desktops and Start Menu folders.
     candidates = report["candidates"]
+    if ensure_elevated_for(candidates, silent, root):
+        return 0
     helper_links(root, target)
     tidy_note = ""
     if tidy["removed"] or tidy["fixed"]:
         tidy_note = "\n已整理状态记录：清理 " + str(tidy["removed"]) + " 条，修正 " + str(tidy["fixed"]) + " 条。"
     if not candidates:
+        write_log(root, ["无事可做：没有待接入的入口。",
+                         "已接入 " + str(len(report["already_guarded"])) + " 个，跳过 " + str(len(report["skipped"])) + " 个。",
+                         "范围：" + "、".join(report["scope"])])
         message("程序已就位并校验：" + VERSION + "\n固定安装目录：" + str(root) + tidy_note + "\n\n未发现需要新接入的快捷方式。\n已接入并保留：" + str(len(report["already_guarded"])) + " 个\n跳过：" + str(len(report["skipped"])) + " 个\n\n已接入的图标会直接使用该目录里的程序，无需重新接入。\n" + SCOPE_NOTE, "检查器已更新")
         return 0
     count = 0
     for offset in range(0, len(candidates), 10):
         batch = candidates[offset:offset + 10]
-        if not confirm_paths(batch, "接入"):
+        if not silent and not confirm_paths(batch, "接入"):
+            write_log(root, ["已取消（确认框未点「是」），已完成 " + str(count) + " 个。"])
             message("已取消后续操作。已完成 " + str(count) + " 个，其余未修改。", "操作已停止")
             return 2
         changed = install_batch(batch, target, root)
         count += len(changed)
+        write_log(root, ["接入 -> " + item for item in changed])
     ctypes.WinDLL("shell32").SHChangeNotify(0x08000000, 0, None, None)
+    write_log(root, ["完成：本次接入 " + str(count) + " 个，共受管 " + str(len(load(root / "state.json", {"entries": {}})["entries"])) + " 个。",
+                     "模式：" + ("静默（--yes）" if silent else "交互确认")])
     message("接入成功，并已校验：" + str(count) + " 个图标。\n\n版本：" + VERSION + "\n固定安装目录：" + str(root) + tidy_note + "\n备份：该目录内 backups\n\n分享压缩包/下载目录可删除，固定安装目录不能删除，也不能单独移动其中的 AdobeClashGuard.exe。\n以后用原图标启动即可；新增 Adobe 或 Clash 图标可重新运行本工具。\n额外拦截进程可编辑 " + BLOCKERS_FILE + "，改完立即生效。\n跳过/已接入：" + str(len(report["skipped"])) + "/" + str(len(report["already_guarded"])), "安装成功")
     return 0
 
 
-def restore_ui():
+def restore_ui(silent=False):
     root = state_root()
     state = load(root / "state.json", {"entries": {}})
     records = []
@@ -631,15 +744,20 @@ def restore_ui():
         if record["state"] != "restored" and path.is_file() and sha(path) == record["staged_sha256"]:
             records.append(record)
     if not records:
+        write_log(root, ["恢复：没有可恢复的受管图标。"])
         message("没有可恢复的受管图标。已删除或被其他程序改动的图标不会覆盖。", "恢复结果")
+        return 0
+    if ensure_elevated_for(records, silent, root):
         return 0
     count = 0
     for offset in range(0, len(records), 10):
         batch = records[offset:offset + 10]
-        if not confirm_paths(batch, "恢复"):
+        if not silent and not confirm_paths(batch, "恢复"):
+            write_log(root, ["恢复已取消，已完成 " + str(count) + " 个。"])
             return 2
         count += len(restore_batch(batch, root))
     ctypes.WinDLL("shell32").SHChangeNotify(0x08000000, 0, None, None)
+    write_log(root, ["恢复完成 " + str(count) + " 个。"])
     message("已恢复并校验 " + str(count) + " 个原图标。备份与程序仍保留，未删除任何文件。", "恢复完成")
     return 0
 
@@ -667,7 +785,8 @@ def main(args=None):
             write_scan_report(report, Path(args[1]))
             return 0
         # No UAC relaunch: avoid scanning an administrator's desktop under alternate credentials.
-        if not args or args in (["--install"], ["--restore"]):
+        action, silent = parse_args(args)
+        if action is not None:
             k = ctypes.WinDLL("kernel32", use_last_error=True)
             k.CreateMutexW.argtypes = [wt.LPVOID, wt.BOOL, wt.LPCWSTR]
             k.CreateMutexW.restype = wt.HANDLE
@@ -679,12 +798,16 @@ def main(args=None):
             try:
                 if ctypes.get_last_error() == 183:
                     raise RuntimeError("另一个安装窗口已打开，请先完成或取消。")
-                return restore_ui() if args == ["--restore"] else install_ui()
+                return restore_ui(silent) if action == "--restore" else install_ui(silent)
             finally:
                 k.ReleaseMutex(handle)
                 k.CloseHandle(handle)
         raise RuntimeError("未知参数")
     except Exception as exc:
+        try:
+            write_log(state_root(), ["运行失败：" + str(exc)])
+        except Exception:
+            pass
         message("操作未完成，已停止后续处理。\n\n" + str(exc) + "\n\n不要关闭安全软件。若公共桌面写权限不足，可用当前同一账户右键以管理员身份运行。\n已生成的备份保留在固定安装目录。", "Adobe 启动检查 — 错误", 0x10)
         return 1
 

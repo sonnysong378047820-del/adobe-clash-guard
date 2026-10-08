@@ -25,11 +25,11 @@
 | 先备份再改 | 每一步先备份并校验，首个失败立即停止；提供一键恢复入口 |
 | 不常驻后台 | 检查完就退出，不是常驻监控进程，不占内存 |
 | 文件夹版分发 | 2.1.1 起改用 `--onedir`，运行时不向 `%TEMP%` 自解压，不再出现"无法删除临时目录"警告，启动也更快 |
-| 可验证 | 31 项自动测试 + 端到端验收脚本，见 [`tests/`](tests/) 与 [`tools/`](tools/) |
+| 可验证 | 38 项自动测试 + 端到端验收脚本，见 [`tests/`](tests/) 与 [`tools/`](tools/) |
 
 ## 下载使用
 
-到 [Releases](../../releases/latest) 下载 `AdobeClashGuard-v2.2.0-win64.zip`，完整解压后：
+到 [Releases](../../releases/latest) 下载 `AdobeClashGuard-v2.2.1-win64.zip`，完整解压后：
 
 1. 右键 `AdobeClashGuard\AdobeClashGuard.exe` → **以管理员身份运行**（公共桌面上的 Clash 图标通常需要管理员权限才能修改）
 2. 程序自动扫描并列出识别到的图标，确认后接入
@@ -122,7 +122,7 @@ requirements.txt         依赖版本
 src/
   adobe_clash_guard.py   主程序（全部逻辑）
 tests/
-  test_universal.py      31 项自动测试
+  test_universal.py      38 项自动测试
 tools/
   verify_package.py      端到端验收脚本
 docs/
@@ -141,6 +141,7 @@ licenses/                第三方组件许可全文
 
 | 版本 | 主要变化 |
 |---|---|
+| **2.2.1** | ① 接入入口改为**静默模式**（`--install --yes`）：旧版动手前会弹一个是/否框，而它的默认焦点不在「是」上——按 Esc、点「否」或当成普通提示关掉都等于取消，这是"点了程序却没反应"的头号原因 ② 入口快捷方式写入 `RunAsUser` 标志，**双击即弹 UAC**，不必再去右键菜单里找「以管理员身份运行」 ③ 批次涉及公共开始菜单时若未提权，程序**自己请求提权**（`ShellExecute runas`）；提权被拒则明确报错并且不改任何图标 ④ 每次运行追加写入 `install-log.txt`（含时间、接入清单、失败原因）|
 | **2.2.0** | ① 扫描范围扩到用户级与公共开始菜单（递归，跳过「启动」文件夹），堵上"从开始菜单启动 Clash 绕过检查"的旁路 ② 拦截进程名单外挂为 `blockers.txt`，加名字不用重新打包 ③ 内置名单补 `verge-mihomo-alpha.exe`、`mihomo-alpha.exe`，切换 Alpha 内核不再静默失效 ④ 安装时自动整理 `state.json`（清重复与无效记录）⑤ `--scan` 报告新增 `tampered`，报出被安装器改写的受管图标 |
 | 2.1.1 | 改为文件夹版（`--onedir`）分发，不再向 `%TEMP%` 自解压 |
 | 2.1.0 | 增加反向拦截（Clash 启动前检查 Adobe）；固定安装目录 |

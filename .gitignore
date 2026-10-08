@@ -8,6 +8,7 @@ venv/
 # PyInstaller 构建产物
 build/
 dist/
+dist2/
 rebuilt/
 *.manifest
 

@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -328,6 +329,71 @@ class UniversalTests(unittest.TestCase):
         self.assertIn("改写", found[0]["reason"])
         path.unlink()
         self.assertIn("不存在", g.tampered_entries(root)[0]["reason"])
+
+    def test_parse_args_separates_quiet_from_interactive(self):
+        self.assertEqual(g.parse_args([]), ("--install", False))
+        self.assertEqual(g.parse_args(["--install"]), ("--install", False))
+        self.assertEqual(g.parse_args(["--install", "--yes"]), ("--install", True))
+        self.assertEqual(g.parse_args(["--restore", "--yes"]), ("--restore", True))
+        self.assertIsNone(g.parse_args(["--scan", "out.json"])[0])
+        self.assertIsNone(g.parse_args(["--launch", "key"])[0])
+        with self.assertRaises(RuntimeError):
+            g.parse_args(["--install", "--force"])
+
+    def test_write_log_appends_one_timestamped_block_per_run(self):
+        root = self.base / "log"
+        root.mkdir()
+        first = g.write_log(root, ["接入 -> A", "完成 1 个"])
+        self.assertEqual(first.name, g.INSTALL_LOG)
+        g.write_log(root, ["接入 -> B"])
+        text = first.read_text(encoding="utf-8")
+        self.assertEqual(text.count("====="), 4)  # 两条分隔线，每条两端各五个等号
+        self.assertLess(text.index("接入 -> A"), text.index("接入 -> B"))
+
+    def test_helper_links_ship_the_quiet_install_entry(self):
+        root = self.base / "links"
+        root.mkdir()
+        target = root / "AdobeClashGuard.exe"
+        target.write_bytes(b"stub")
+        g.helper_links(root, target)
+        install = pylnk3.parse(str(root / ("补充接入 Adobe 与 Clash 图标.lnk")))
+        restore = pylnk3.parse(str(root / ("恢复 Adobe 与 Clash 原图标.lnk")))
+        self.assertEqual(install.arguments, "--install --yes")
+        self.assertEqual(restore.arguments, "--restore")
+
+    def test_helper_links_request_elevation(self):
+        root = self.base / "links-admin"
+        root.mkdir()
+        target = root / "AdobeClashGuard.exe"
+        target.write_bytes(b"stub")
+        g.helper_links(root, target)
+        for name in ("补充接入 Adobe 与 Clash 图标.lnk", "恢复 Adobe 与 Clash 原图标.lnk"):
+            raw = (root / name).read_bytes()
+            self.assertEqual(int.from_bytes(raw[0:4], "little"), 76)
+            flags = int.from_bytes(raw[20:24], "little")
+            self.assertTrue(flags & 0x2000, name + " 缺少 RunAsUser 标志")
+            # 保留原有位，避免覆盖 pylnk3 写好的 HasArguments / IsUnicode 等标志
+            self.assertTrue(flags & 0x80, name + " 丢失 Unicode 标志")
+
+    def test_mark_run_as_admin_ignores_non_lnk_data(self):
+        broken = self.base / "broken.lnk"
+        broken.write_bytes(b"not a shortcut at all")
+        g.mark_run_as_admin(broken)
+        self.assertEqual(broken.read_bytes(), b"not a shortcut at all")
+
+    def test_admin_scope_only_covers_programdata(self):
+        programdata = Path(os.environ.get("ProgramData", r"C:\ProgramData"))
+        self.assertTrue(g.is_admin_scope(programdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Clash Verge.lnk"))
+        # 公共桌面普通用户可写（既有接入记录证实），不算管理员范围
+        self.assertFalse(g.is_admin_scope(Path(r"C:\Users\Public\Desktop\Clash Verge.lnk")))
+        self.assertFalse(g.is_admin_scope(Path(os.environ["USERPROFILE"]) / "Desktop" / "Adobe Photoshop 2024.lnk"))
+        self.assertFalse(g.is_admin_scope(Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Clash Verge.lnk"))
+
+    def test_ensure_elevated_stays_put_when_no_admin_path_involved(self):
+        # 只涉及用户桌面/用户开始菜单时，不应触发自我提权（否则会莫名弹 UAC）
+        self.assertFalse(g.ensure_elevated_for([], True, self.base))
+        desktop = Path(os.environ["USERPROFILE"]) / "Desktop" / "Adobe Photoshop 2024.lnk"
+        self.assertFalse(g.ensure_elevated_for([{"source": str(desktop)}], True, self.base))
 
     def test_real_desktop_and_start_menu_paths_available(self):
         self.assertTrue(g.start_menu_roots())
