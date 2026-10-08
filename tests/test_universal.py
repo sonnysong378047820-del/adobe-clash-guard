@@ -213,7 +213,7 @@ class UniversalTests(unittest.TestCase):
 
     def test_service_only_never_blocks_either_side(self):
         self.assertEqual(g.adobe_running(["AdobeIPCBroker.exe", "AdobeUpdateService.exe", "clash-verge-service.exe"]), [])
-        self.assertEqual(g.clash_running(["clash-verge-service.exe"]), [])
+        self.assertEqual(g.clash_running(["clash-verge-service.exe"], g.BLOCKERS), [])
 
     def test_unknown_registered_adobe_app_is_blocker(self):
         start = Mock()
@@ -243,7 +243,96 @@ class UniversalTests(unittest.TestCase):
         self.shortcut("Clash 服务", self.executable("clash-verge-service.exe", "ProxyApps"))
         self.assertEqual(g.scan([self.desktop], self.vendor)["candidates"], [])
 
-    def test_real_desktop_paths_and_processes_available(self):
+    def test_alpha_core_counts_as_blocker_and_is_detected(self):
+        self.assertEqual(g.clash_running(["verge-mihomo-alpha.exe"], g.BLOCKERS), ["verge-mihomo-alpha.exe"])
+        self.assertEqual(g.clash_running(["MIHOMO-ALPHA.EXE"], g.BLOCKERS), ["mihomo-alpha.exe"])
+        target = self.executable("verge-mihomo-alpha.exe", "ProxyApps")
+        self.shortcut("代理内核 任意名字", target)
+        result = g.scan([self.desktop], self.vendor)
+        self.assertEqual(result["candidates"][0]["kind"], "clash")
+
+    def test_blockers_file_extends_builtin_names(self):
+        root = self.base / "state"
+        root.mkdir()
+        self.assertEqual(g.load_blockers(root), g.BLOCKERS)
+        (root / g.BLOCKERS_FILE).write_text(
+            "\ufeff# 注释行\n\n  my-proxy.exe  \nSing-Box.exe # 行尾注释\nlegacy\n", encoding="utf-8")
+        names = g.load_blockers(root)
+        self.assertIn("my-proxy.exe", names)
+        self.assertIn("sing-box.exe", names)
+        self.assertIn("legacy", names)
+        self.assertNotIn("# 注释行", names)
+        self.assertTrue(g.BLOCKERS.issubset(names))
+        self.assertEqual(g.clash_running(["MY-PROXY.EXE", "clash-verge.exe"], names), ["clash-verge.exe", "my-proxy.exe"])
+        self.assertEqual(g.clash_running(["my-proxy.exe"], g.BLOCKERS), [])
+
+    def test_ensure_blockers_file_never_overwrites_existing(self):
+        root = self.base / "state"
+        root.mkdir()
+        self.assertTrue(g.ensure_blockers_file(root))
+        path = root / g.BLOCKERS_FILE
+        self.assertIn("verge-mihomo-alpha.exe", path.read_text(encoding="utf-8"))
+        path.write_text("mine.exe\n", encoding="utf-8")
+        self.assertFalse(g.ensure_blockers_file(root))
+        self.assertEqual(path.read_text(encoding="utf-8"), "mine.exe\n")
+
+    def test_recursive_root_covers_subfolders_but_not_startup(self):
+        target = self.executable("Photoshop.exe")
+        nested = self.desktop / "Adobe 程序组"
+        nested.mkdir()
+        self.shortcut("PS 嵌套", target, root=nested)
+        startup = self.desktop / "Startup"
+        startup.mkdir()
+        self.shortcut("Adobe 开机启动", target, root=startup)
+        result = g.scan([(self.desktop, True)], self.vendor)
+        self.assertEqual([item["name"] for item in result["candidates"]], ["PS 嵌套"])
+
+    def test_unrelated_menu_entries_are_not_reported_as_skipped(self):
+        target = self.executable("notepad.exe", "Windows")
+        self.shortcut("记事本", target)
+        self.shortcut("Maxon Cinema 4D 2026", target)
+        self.assertEqual(g.scan([self.desktop], self.vendor)["skipped"], [])
+
+    def test_prune_state_drops_aborted_rows_and_flags_rewritten_ones(self):
+        root = self.base / "state"
+        root.mkdir()
+        guarded = self.shortcut("PS", self.executable("Photoshop.exe"))
+        untouched = self.shortcut("AI", self.executable("Illustrator.exe", "Adobe/Adobe Illustrator 2031"))
+        promoted = self.shortcut("ME", self.executable("Adobe Media Encoder.exe", "Adobe/Adobe Media Encoder 2031"))
+        rewritten = self.shortcut("AE", self.executable("AfterFX.exe", "Adobe/Adobe After Effects 2031"))
+        g.save(root / "state.json", {"version": "0", "entries": {
+            "keep": {"source": str(guarded), "state": "installed", "source_sha256": g.sha(guarded), "staged_sha256": g.sha(guarded)},
+            "duplicate": {"source": str(guarded), "state": "prepared", "source_sha256": g.sha(guarded), "staged_sha256": "0" * 64},
+            "never-applied": {"source": str(untouched), "state": "prepared", "source_sha256": g.sha(untouched), "staged_sha256": "1" * 64},
+            "applied-but-stale": {"source": str(promoted), "state": "prepared", "source_sha256": "2" * 64, "staged_sha256": g.sha(promoted)},
+            "overwritten": {"source": str(rewritten), "state": "installed", "source_sha256": g.sha(rewritten), "staged_sha256": "3" * 64},
+        }})
+        self.assertEqual(g.prune_state(root), {"removed": 2, "fixed": 2})
+        state = g.load(root / "state.json")
+        self.assertEqual(set(state["entries"]), {"keep", "applied-but-stale", "overwritten"})
+        self.assertEqual(state["entries"]["applied-but-stale"]["state"], "installed")
+        self.assertEqual(state["entries"]["overwritten"]["state"], "superseded")
+        self.assertEqual(state["version"], g.VERSION)
+        for record in state["entries"].values():
+            self.assertTrue(Path(record["source"]).is_file())
+
+    def test_tampered_entries_flags_rewritten_managed_shortcut(self):
+        root = self.base / "state"
+        path = self.shortcut("PS", self.executable("Photoshop.exe"))
+        g.install_batch(g.scan([self.desktop], self.vendor)["candidates"], self.executable("AdobeClashGuard.exe", "guard"), root)
+        self.assertEqual(g.tampered_entries(root), [])
+        path.write_bytes(b"rewritten by an installer")
+        found = g.tampered_entries(root)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["source"], str(path))
+        self.assertIn("改写", found[0]["reason"])
+        path.unlink()
+        self.assertIn("不存在", g.tampered_entries(root)[0]["reason"])
+
+    def test_real_desktop_and_start_menu_paths_available(self):
+        self.assertTrue(g.start_menu_roots())
+        self.assertTrue(all(p.is_dir() for p in g.start_menu_roots()))
+        self.assertTrue(all(p.is_dir() for p in g.desktops()))
         self.assertTrue(all(p.is_dir() for p in g.desktops()))
         self.assertIn(Path(sys.executable).name.lower(), g.process_names())
         self.assertTrue(isinstance(g.company_name(Path(sys.executable)), str))

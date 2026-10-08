@@ -12,7 +12,8 @@ import time
 import pylnk3
 import adobe_clash_guard as g
 
-ROOT = Path(__file__).resolve().parent
+# Repository root: this script lives in tools/, and dist/ plus the result files sit one level up.
+ROOT = Path(__file__).resolve().parent.parent
 USER = ctypes.WinDLL("user32", use_last_error=True)
 SHELL = ctypes.WinDLL("shell32", use_last_error=True)
 SHELL.ShellExecuteW.argtypes = [wt.HWND, wt.LPCWSTR, wt.LPCWSTR, wt.LPCWSTR, wt.LPCWSTR, ctypes.c_int]
@@ -66,7 +67,9 @@ def dismiss(title, button=2, expect_retry_cancel=False):
 
 def drive_install(process):
     """Answer dialogs of a sandboxed --install run. Confirmation dialogs are always cancelled."""
-    buttons = [("检查器已更新", 1), ("安装成功", 1), ("操作已停止", 1), ("自动识别结果", 1), ("Adobe 启动检查 — 确认接入", 2), ("Adobe 启动检查 — 错误", 1)]
+    # "确认接入" is a MB_YESNO box, so cancelling it means IDNO (7); IDCANCEL (2) matches no button
+    # and leaves the dialog open. Cancelling is always the safe answer here: never approve a write.
+    buttons = [("检查器已更新", 1), ("安装成功", 1), ("操作已停止", 1), ("自动识别结果", 1), ("Adobe 启动检查 — 确认接入", 7), ("Adobe 启动检查 — 错误", 1)]
     lookup = dict(buttons)
     answered = []
     deadline = time.monotonic() + 40

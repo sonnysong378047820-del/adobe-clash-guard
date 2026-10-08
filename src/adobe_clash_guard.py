@@ -14,10 +14,14 @@ import uuid
 
 import pylnk3
 
-VERSION = "2.1.1"
-BLOCKERS = {"clash-verge.exe", "clash verge.exe", "verge-mihomo.exe", "mihomo.exe", "clash.exe", "clash-meta.exe"}
+VERSION = "2.2.0"
+# Built-in blocker process names. More can be appended without repackaging through
+# the plain-text "blockers.txt" kept in the fixed install directory; see load_blockers().
+# The alpha core (verge-mihomo-alpha.exe) is listed here because a user can switch
+# cores inside Clash Verge, and an unrecognized core would fail silently.
+BLOCKERS = {"clash-verge.exe", "clash verge.exe", "verge-mihomo.exe", "verge-mihomo-alpha.exe", "mihomo.exe", "mihomo-alpha.exe", "clash.exe", "clash-meta.exe"}
 ADOBE_PROCESS_NAMES = {"photoshop.exe", "afterfx.exe", "illustrator.exe", "adobe media encoder.exe", "adobe premiere pro.exe", "indesign.exe", "acrobat.exe", "acrord32.exe", "audition.exe", "adobe audition.exe", "bridge.exe", "lightroom.exe", "adobe animate.exe", "animate.exe", "character animator.exe", "adobe character animator.exe", "adobe fresco.exe", "adobe dimension.exe", "adobe substance 3d painter.exe", "adobe substance 3d designer.exe", "adobe substance 3d sampler.exe", "adobe substance 3d stager.exe", "creative cloud.exe", "adobe express.exe"}
-CLASH_TARGET_NAMES = {"clash verge.exe", "clash-verge.exe", "clash.exe", "clash-meta.exe", "mihomo.exe", "verge-mihomo.exe"}
+CLASH_TARGET_NAMES = {"clash verge.exe", "clash-verge.exe", "clash.exe", "clash-meta.exe", "mihomo.exe", "mihomo-alpha.exe", "verge-mihomo.exe", "verge-mihomo-alpha.exe"}
 KNOWN_ADOBE_EXES = {"photoshop.exe", "afterfx.exe", "illustrator.exe", "adobe media encoder.exe", "adobe premiere pro.exe", "indesign.exe", "acrobat.exe", "acrord32.exe", "audition.exe", "adobe audition.exe", "bridge.exe", "lightroom.exe", "adobe animate.exe", "animate.exe", "character animator.exe", "adobe character animator.exe", "adobe fresco.exe", "adobe dimension.exe", "adobe substance 3d painter.exe", "adobe substance 3d designer.exe", "adobe substance 3d sampler.exe", "adobe substance 3d stager.exe", "creative cloud.exe", "adobe express.exe"}
 SELF = Path(sys.executable) if getattr(sys, "frozen", False) else Path(__file__).resolve()
 
@@ -46,6 +50,62 @@ def state_root():
     return Path(base) / "AdobeClashGuard" / "v2.1"
 
 
+BLOCKERS_FILE = "blockers.txt"
+BLOCKERS_TEMPLATE = """\
+# Adobe × Clash 互斥检查 —— 额外拦截进程名单
+#
+# 作用：告诉检查器还有哪些进程算「Clash / 代理内核」。
+# 格式：一行一个进程名，要带 .exe；不区分大小写；
+#       以 # 开头的行是注释；空行会被忽略。
+# 生效：保存后立即生效，不需要重新安装或重启本工具。
+#
+# 程序已内置以下名称（这里不写也照样拦，写了也不冲突）：
+#   clash-verge.exe          verge-mihomo.exe        verge-mihomo-alpha.exe
+#   clash verge.exe          mihomo.exe              mihomo-alpha.exe
+#   clash.exe                clash-meta.exe
+#
+# 示例：去掉行首的 # 即可启用
+# my-proxy.exe
+# sing-box.exe
+#
+"""
+
+
+def blockers_path(root=None):
+    return (Path(root) if root is not None else state_root()) / BLOCKERS_FILE
+
+
+def load_blockers(root=None):
+    """Built-in blocker names plus anything the user appended to blockers.txt.
+
+    The file sits next to the program rather than inside the bundle, so it
+    survives updates and can be edited without repackaging. A missing or
+    unreadable file simply falls back to the built-in names.
+    """
+    names = set(BLOCKERS)
+    try:
+        text = blockers_path(root).read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return names
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            names.add(line.casefold())
+    return names
+
+
+def ensure_blockers_file(root):
+    """Write the editable list once. An existing file is never overwritten."""
+    path = blockers_path(root)
+    if path.exists():
+        return False
+    try:
+        path.write_text(BLOCKERS_TEMPLATE, encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
 def desktops():
     # Windows resolves relocated and OneDrive desktops for the active user.
     shell = ctypes.WinDLL("shell32", use_last_error=True)
@@ -60,6 +120,42 @@ def desktops():
         if path.is_dir() and path not in result:
             result.append(path)
     return result
+
+
+def start_menu_roots():
+    """Current-user and all-user Start Menu program folders.
+
+    Clash Verge's installer rebuilds its Start Menu entry on every update, which
+    opened a live bypass: launching Clash from the Start Menu or Win-key search
+    skipped the guard entirely. These folders are scanned recursively.
+    """
+    shell = ctypes.WinDLL("shell32", use_last_error=True)
+    shell.SHGetFolderPathW.argtypes = [wt.HWND, ctypes.c_int, wt.HANDLE, wt.DWORD, wt.LPWSTR]
+    result = []
+    for key in (0x02, 0x17):  # CSIDL_PROGRAMS (user), CSIDL_COMMON_PROGRAMS (all users)
+        buffer = ctypes.create_unicode_buffer(32768)
+        if shell.SHGetFolderPathW(None, key, None, 0, buffer) != 0:
+            continue
+        path = Path(buffer.value)
+        if path.is_dir() and path not in result:
+            result.append(path)
+    return result
+
+
+def in_startup(path):
+    """Sign-in startup entries stay untouched: guarding them would only add pop-ups."""
+    return any(part.casefold() == "startup" for part in Path(path).parts)
+
+
+# The Start Menu holds dozens of unrelated links; only report skips that match the subject.
+NOTEWORTHY = ("adobe", "clash", "mihomo", "verge", "photoshop", "illustrator", "after effects",
+              "premiere", "media encoder", "lightroom", "indesign", "audition", "acrobat",
+              "animate", "substance", "fresco", "dimension", "bridge", "creative cloud")
+
+
+def noteworthy(path):
+    name = Path(path).name.casefold()
+    return any(word in name for word in NOTEWORTHY)
 
 
 class PROCESSENTRY32W(ctypes.Structure):
@@ -144,23 +240,37 @@ def inspect_shortcut(path, vendor_reader=company_name):
 
 
 def scan(roots=None, vendor_reader=company_name):
+    """Read-only scan of shortcut locations.
+
+    ``roots=None`` covers both desktop folders plus both Start Menu program
+    folders, the latter recursively but skipping sign-in "Startup" folders.
+    An explicit ``roots`` list is scanned at top level only; each item may be a
+    path or a ``(path, recursive)`` pair.
+    """
     result = {"version": VERSION, "scope": [], "candidates": [], "already_guarded": [], "skipped": []}
+    if roots is None:
+        targets = [(path, False) for path in desktops()] + [(path, True) for path in start_menu_roots()]
+    else:
+        targets = [(Path(item[0]), bool(item[1])) if isinstance(item, (tuple, list)) else (Path(item), False) for item in roots]
     seen = set()
-    for root in (desktops() if roots is None else roots):
-        root = Path(root)
+    for root, recursive in targets:
         result["scope"].append(str(root))
-        for path in sorted(root.glob("*.lnk")):
-            if str(path.resolve()).casefold() in seen:
+        for path in sorted(root.glob("**/*.lnk" if recursive else "*.lnk")):
+            if recursive and in_startup(path):
                 continue
-            seen.add(str(path.resolve()).casefold())
+            marker = str(path.resolve()).casefold()
+            if marker in seen:
+                continue
+            seen.add(marker)
             try:
                 item = inspect_shortcut(path, vendor_reader)
                 if item:
                     result["candidates" if item["status"] == "candidate" else "already_guarded"].append(item)
-                elif "adobe" in path.name.lower():
+                elif noteworthy(path):
                     result["skipped"].append({"source": str(path), "reason": "目标不是可确认的 Adobe 应用 EXE，或是卸载/安装入口"})
             except Exception as exc:
-                result["skipped"].append({"source": str(path), "reason": str(exc)})
+                if noteworthy(path):
+                    result["skipped"].append({"source": str(path), "reason": str(exc)})
     return result
 
 
@@ -169,8 +279,10 @@ def adobe_running(names, extra=()):
     return sorted(lower & (ADOBE_PROCESS_NAMES | {name.lower() for name in extra}))
 
 
-def clash_running(names):
-    return sorted({name.lower() for name in names} & BLOCKERS)
+def clash_running(names, blockers=None):
+    """Blocker names found among running processes; ``blockers`` overrides the file."""
+    known = load_blockers() if blockers is None else {name.casefold() for name in blockers}
+    return sorted({name.lower() for name in names} & known)
 
 
 def make_link(path, executable, key, item):
@@ -338,6 +450,69 @@ def restore_batch(records, root):
     return changed
 
 
+def prune_state(root, version=VERSION):
+    """Tidy the bookkeeping file. Only unusable recovery data is ever dropped.
+
+    Drops duplicate ``prepared`` rows left behind by an aborted install, promotes
+    rows whose shortcut turns out to be guarded already, and marks rows that an
+    external program rewrote -- which is precisely what a Clash Verge update does.
+    """
+    root = Path(root)
+    state = load(root / "state.json")
+    if not state or not isinstance(state.get("entries"), dict):
+        return {"removed": 0, "fixed": 0}
+    entries = state["entries"]
+    installed = {str(Path(r.get("source", "")).resolve()).casefold() for r in entries.values() if r.get("state") == "installed"}
+    removed, fixed = [], []
+    for key, record in list(entries.items()):
+        source = Path(record.get("source", ""))
+        try:
+            current = sha(source) if source.is_file() else None
+        except OSError:
+            current = None
+        if record.get("state") == "prepared":
+            if str(source.resolve()).casefold() in installed:
+                removed.append(key)            # same shortcut is guarded under another key
+            elif current == record.get("source_sha256"):
+                removed.append(key)            # the write never landed; nothing to restore
+            elif current == record.get("staged_sha256"):
+                record["state"] = "installed"  # guarded in fact, only the flag was stale
+                fixed.append(key)
+        elif record.get("state") == "installed" and current is not None and current != record.get("staged_sha256"):
+            record["state"] = "superseded"     # rewritten by someone else; no longer managed
+            fixed.append(key)
+    for key in removed:
+        del entries[key]
+    state["version"] = version
+    save(root / "state.json", state)
+    return {"removed": len(removed), "fixed": len(fixed)}
+
+
+def tampered_entries(root):
+    """Managed shortcuts that no longer match what the guard installed.
+
+    An installer that rewrites a shortcut silently disarms the guard, so surface
+    those instead of failing quietly.
+    """
+    state = load(Path(root) / "state.json")
+    if not state:
+        return []
+    result = []
+    for key, record in state.get("entries", {}).items():
+        if record.get("state") != "installed":
+            continue
+        source = Path(record.get("source", ""))
+        if not source.is_file():
+            result.append({"key": key, "source": str(source), "reason": "快捷方式已不存在"})
+            continue
+        try:
+            if sha(source) != record.get("staged_sha256"):
+                result.append({"key": key, "source": str(source), "reason": "内容已被其他程序改写，拦截可能已失效"})
+        except OSError as exc:
+            result.append({"key": key, "source": str(source), "reason": str(exc)})
+    return result
+
+
 def message(text, title, flags=0x40):
     user = ctypes.WinDLL("user32", use_last_error=True)
     user.MessageBoxW.argtypes = [wt.HWND, wt.LPCWSTR, wt.LPCWSTR, wt.UINT]
@@ -350,7 +525,7 @@ def message(text, title, flags=0x40):
 def confirm_paths(items, action):
     text = "此操作非常危险，可能导致不可逆的数据丢失！\n\n本批将" + action + "以下快捷方式（仅更改启动目标，不改 Adobe 安装文件）：\n\n"
     text += "\n".join(item["source"] for item in items)
-    text += "\n\n将先逐个备份并校验。错误配置可能导致图标无法启动。\n仅本批受管图标有双向检查；自启动、开始菜单、直接 EXE 等入口不受控。\n同时点击已序列化，但进程权限/延迟启动等边界仍不能保证系统级互斥。\n是否确认继续？"
+    text += "\n\n将先逐个备份并校验。错误配置可能导致图标无法启动。\n仅本批受管图标有双向检查；开机启动项、直接双击 EXE、其他用户桌面等入口仍不受控。\n同时点击已序列化，但进程权限/延迟启动等边界仍不能保证系统级互斥。\n是否确认继续？"
     return message(text, "Adobe 启动检查 — 确认" + action, 0x134) == 6
 
 
@@ -415,16 +590,24 @@ def helper_links(root, target):
         pylnk3.for_file(str(target), str(Path(root) / (name + ".lnk")), arguments=flag, work_dir=str(root))
 
 
+SCOPE_NOTE = "扫描范围：当前用户桌面、公共桌面，以及用户级与公共开始菜单（递归，不含「启动」文件夹）。"
+
+
 def install_ui():
     root = state_root()
     # Program first: an updated build replaces the same fixed path, so already-guarded
     # shortcuts pick it up without being touched again.
     target = install_program(root)
-    report = scan()  # Read-only scan of the two desktop roots.
+    ensure_blockers_file(root)
+    tidy = prune_state(root)
+    report = scan()  # Read-only scan of desktops and Start Menu folders.
     candidates = report["candidates"]
     helper_links(root, target)
+    tidy_note = ""
+    if tidy["removed"] or tidy["fixed"]:
+        tidy_note = "\n已整理状态记录：清理 " + str(tidy["removed"]) + " 条，修正 " + str(tidy["fixed"]) + " 条。"
     if not candidates:
-        message("程序已就位并校验：" + VERSION + "\n固定安装目录：" + str(root) + "\n\n未发现需要新接入的桌面快捷方式。\n已接入并保留：" + str(len(report["already_guarded"])) + " 个\n跳过：" + str(len(report["skipped"])) + " 个\n\n已接入的图标会直接使用该目录里的程序，无需重新接入。\n扫描仅覆盖当前用户桌面和公共桌面的顶层 .lnk。", "检查器已更新")
+        message("程序已就位并校验：" + VERSION + "\n固定安装目录：" + str(root) + tidy_note + "\n\n未发现需要新接入的快捷方式。\n已接入并保留：" + str(len(report["already_guarded"])) + " 个\n跳过：" + str(len(report["skipped"])) + " 个\n\n已接入的图标会直接使用该目录里的程序，无需重新接入。\n" + SCOPE_NOTE, "检查器已更新")
         return 0
     count = 0
     for offset in range(0, len(candidates), 10):
@@ -435,7 +618,7 @@ def install_ui():
         changed = install_batch(batch, target, root)
         count += len(changed)
     ctypes.WinDLL("shell32").SHChangeNotify(0x08000000, 0, None, None)
-    message("接入成功，并已校验：" + str(count) + " 个图标。\n\n版本：" + VERSION + "\n固定安装目录：" + str(root) + "\n备份：该目录内 backups\n\n分享压缩包/下载目录可删除，固定安装目录不能删除，也不能单独移动其中的 AdobeClashGuard.exe。\n以后用原桌面图标启动即可；新增 Adobe 或 Clash 图标可重新运行本工具。\n跳过/已接入：" + str(len(report["skipped"])) + "/" + str(len(report["already_guarded"])), "安装成功")
+    message("接入成功，并已校验：" + str(count) + " 个图标。\n\n版本：" + VERSION + "\n固定安装目录：" + str(root) + tidy_note + "\n备份：该目录内 backups\n\n分享压缩包/下载目录可删除，固定安装目录不能删除，也不能单独移动其中的 AdobeClashGuard.exe。\n以后用原图标启动即可；新增 Adobe 或 Clash 图标可重新运行本工具。\n额外拦截进程可编辑 " + BLOCKERS_FILE + "，改完立即生效。\n跳过/已接入：" + str(len(report["skipped"])) + "/" + str(len(report["already_guarded"])), "安装成功")
     return 0
 
 
@@ -477,7 +660,11 @@ def main(args=None):
         if args and args[0] == "--scan":
             if len(args) != 2:
                 raise RuntimeError("只读扫描需指定报告文件路径")
-            write_scan_report(scan(), Path(args[1]))
+            report = scan()
+            # Surface managed shortcuts that another program rewrote: that is how an
+            # installer disarms the guard, and it must not pass unnoticed.
+            report["tampered"] = tampered_entries(state_root())
+            write_scan_report(report, Path(args[1]))
             return 0
         # No UAC relaunch: avoid scanning an administrator's desktop under alternate credentials.
         if not args or args in (["--install"], ["--restore"]):

@@ -11,6 +11,11 @@ dist/
 rebuilt/
 *.manifest
 
+# 测试与验收产物
+tests/test-results.txt
+binary-scan.json
+package-test-results.json
+
 # 编辑器 / 系统
 .vscode/
 .idea/
