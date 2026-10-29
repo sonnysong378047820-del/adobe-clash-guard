@@ -25,6 +25,7 @@
 | 先备份再改 | 每一步先备份并校验，首个失败立即停止；提供一键恢复入口 |
 | 不常驻后台 | 检查完就退出，不是常驻监控进程，不占内存 |
 | 文件夹版分发 | 2.1.1 起改用 `--onedir`，运行时不向 `%TEMP%` 自解压，不再出现"无法删除临时目录"警告，启动也更快 |
+| 文件关联可选接入 | 2.3.0 起附 `tools/install_file_associations.ps1`，把 `.ai` / `.psd` / `.aep` / `.eps` 的**双击打开**也纳入检查，堵上"绕过快捷方式"的最大旁路 |
 | 可验证 | 38 项自动测试 + 端到端验收脚本，见 [`tests/`](tests/) 与 [`tools/`](tools/) |
 
 ## 下载使用
@@ -51,11 +52,46 @@
 
 **这不是系统级互斥，不要按"绝对互斥"理解或宣传。** 它能约束的只有**接入本工具的桌面快捷方式**：
 
-- Clash 开机自启动、任务栏固定图标、直接运行 EXE、其他程序内部调用、重启后自动恢复应用、双击 PSD/JPG 的文件关联 —— **这些入口都可能绕过检查**。本工具不修改这些入口、服务、注册表或开机设置。（2.2.0 起开始菜单入口已纳入扫描，接入后同样受管。）
+- Clash 开机自启动、任务栏固定图标、直接运行 EXE、其他程序内部调用、重启后自动恢复应用、双击 PSD/JPG 的文件关联 —— **这些入口都可能绕过检查**。本工具默认不修改这些入口、服务或开机设置。（2.2.0 起开始菜单入口已纳入扫描，接入后同样受管；**2.3.0 起可用 `tools/install_file_associations.ps1` 单独接入 `.ai` / `.psd` / `.aep` / `.eps` 的文件关联**，见下文。）
 - 要让它真正管用，需要**自己关闭 Clash 的开机自启动**，并且日常只用接入过的图标启动 Adobe 与 Clash。
 - 启动互斥锁只在同一登录会话内串行化启动序列，不长期持有应用生命周期锁。进程权限差异、软件的延迟子进程、多用户会话、改名进程都是边界情况，**不保证任何情况下两者都不能共存**。
 - 程序通过**进程名**识别对方。Clash 或 Adobe 若改名、换内核，可能漏检；未知且未登记的软件不覆盖。
 - 它**不解决网络问题**，只是帮你避免"两边同时开着"这个状态。
+
+## 文件关联接入（2.3.0，可选）
+
+**为什么需要**：本工具改写的是 `.lnk` 快捷方式，而**双击 `.ai` 文件走的是另一条完全独立的路径**——注册表 ProgId → 直接调用 `Illustrator.exe "%1"`。所以只接入图标时，双击设计稿能正常打开，检查器根本不在链路上。
+
+**做法**：把打开命令改写为 `AdobeClashGuard.exe --launch <key> "%1"`，让双击也先过检查。
+
+```powershell
+# 在解压后的目录里执行（不需要管理员权限）
+powershell -ExecutionPolicy Bypass -File tools\install_file_associations.ps1
+
+# 撤销
+powershell -ExecutionPolicy Bypass -File tools\install_file_associations.ps1 -Undo
+```
+
+脚本会做三件事：
+
+1. 从 `state.json` 读取已接入的 Adobe 应用及其 key，按目标进程自动匹配扩展名（`illustrator.exe` → `.ai`/`.eps`，`photoshop.exe` → `.psd`，`afterfx.exe` → `.aep`）
+2. 在 `HKCU\Software\Classes\<ProgId>\shell\open\command` 写入接入命令
+3. 把 `AdobeClashGuard.exe` 注册到 `HKCU\Software\Classes\Applications`，否则 Explorer 双击时会因为"认不出这是哪个应用"而弹出「选择一个应用」对话框
+
+**几个刻意的设计**：
+
+| 决定 | 原因 |
+|---|---|
+| 只写 `HKCU`，不碰 `HKLM` | 不需要管理员权限，删键即还原，不影响其他用户 |
+| 不改 `UserChoice` | Win10 1803+ 对 `UserChoice` 有防篡改哈希，硬改会被系统判定无效并重置，反而弹选择框 |
+| 不写死路径和 key | 全部从 `state.json` 读，换了安装位置或重装也能用 |
+| 先备份再写 | 备份在 `HKCU\Software\Classes\AdobeClashGuard.Backup`，`-Undo` 依赖它还原 |
+
+**已知情况**：
+
+- 若某扩展名已被第三方程序接管（例如 `.eps` 被看图或安全软件的文件打开器抢走），脚本照常写入但不会生效——实际生效的是抢占者，与 Adobe 无关，也不影响检查器。
+- 扩展名在系统里没有默认打开方式时脚本会跳过并提示，可先在资源管理器里设置一次再重跑。
+- 只对**已接入本工具**的 Adobe 应用生效；未接入的应用不会出现在 `state.json` 里。
 
 ## 从源码运行 / 构建
 
@@ -125,6 +161,8 @@ tests/
   test_universal.py      38 项自动测试
 tools/
   verify_package.py      端到端验收脚本
+  install_file_associations.ps1
+                         把 .ai/.psd/.aep/.eps 的双击关联接入检查器
 docs/
   使用说明.md / .html    面向使用者的完整说明（含故障排查）
   重建说明.md            构建、依赖替换与测试细节
@@ -141,6 +179,7 @@ licenses/                第三方组件许可全文
 
 | 版本 | 主要变化 |
 |---|---|
+| **2.3.0** | ① 新增 `tools/install_file_associations.ps1`：把 `.ai` / `.psd` / `.aep` / `.eps` 的**双击打开**也接入检查，堵上最大的旁路——此前只接入图标时，双击设计稿可以完全绕过检查 ② 把检查器注册为系统"已知应用"（`HKCU\Software\Classes\Applications`），修掉写入关联后 Explorer 双击弹「选择一个应用」的问题 ③ 全程只写 `HKCU`、不改 `UserChoice`，`-Undo` 一键还原 ④ **本版未改动 exe 本体，无需重新安装**，旧版程序直接跑新脚本即可 |
 | **2.2.1** | ① 接入入口改为**静默模式**（`--install --yes`）：旧版动手前会弹一个是/否框，而它的默认焦点不在「是」上——按 Esc、点「否」或当成普通提示关掉都等于取消，这是"点了程序却没反应"的头号原因 ② 入口快捷方式写入 `RunAsUser` 标志，**双击即弹 UAC**，不必再去右键菜单里找「以管理员身份运行」 ③ 批次涉及公共开始菜单时若未提权，程序**自己请求提权**（`ShellExecute runas`）；提权被拒则明确报错并且不改任何图标 ④ 每次运行追加写入 `install-log.txt`（含时间、接入清单、失败原因）|
 | **2.2.0** | ① 扫描范围扩到用户级与公共开始菜单（递归，跳过「启动」文件夹），堵上"从开始菜单启动 Clash 绕过检查"的旁路 ② 拦截进程名单外挂为 `blockers.txt`，加名字不用重新打包 ③ 内置名单补 `verge-mihomo-alpha.exe`、`mihomo-alpha.exe`，切换 Alpha 内核不再静默失效 ④ 安装时自动整理 `state.json`（清重复与无效记录）⑤ `--scan` 报告新增 `tampered`，报出被安装器改写的受管图标 |
 | 2.1.1 | 改为文件夹版（`--onedir`）分发，不再向 `%TEMP%` 自解压 |
