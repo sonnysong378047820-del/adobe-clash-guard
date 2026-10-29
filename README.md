@@ -30,7 +30,7 @@
 
 ## 下载使用
 
-到 [Releases](../../releases/latest) 下载 `AdobeClashGuard-v2.2.1-win64.zip`，完整解压后：
+到 [Releases](../../releases/latest) 下载 `AdobeClashGuard-v2.3.0-win64.zip`，完整解压后：
 
 1. 右键 `AdobeClashGuard\AdobeClashGuard.exe` → **以管理员身份运行**（公共桌面上的 Clash 图标通常需要管理员权限才能修改）
 2. 程序自动扫描并列出识别到的图标，确认后接入
